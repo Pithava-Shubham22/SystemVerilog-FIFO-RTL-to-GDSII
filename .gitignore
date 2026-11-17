@@ -1,0 +1,29 @@
+# Physical-design run directories
+runs/
+
+# Simulator outputs
+xsim.dir/
+questa/
+work/
+transcript
+vsim.wlf
+*.wdb
+*.vcd
+*.fst
+
+# Tool logs and temporary files
+*.log
+*.jou
+*.tmp
+*.bak
+*.swp
+*.swo
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor settings
+.vscode/
+.idea/

@@ -1,0 +1,10 @@
+{
+  "DESIGN_NAME": "FIFO",
+  "VERILOG_FILES": [
+    "dir::src/FIFO.sv"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 20.0,
+
+  "FP_CORE_UTIL": 40
+}
