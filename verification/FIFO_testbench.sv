@@ -1,4 +1,3 @@
-
 module testbench;
 
 localparam WIDTH = 8;
@@ -29,6 +28,9 @@ reg [WIDTH-1:0] random_data;
 reg random_wr;
 reg random_rd;
 
+integer wr_prob;
+integer rd_prob;
+
 integer wr_disabled_count;
 integer wr_enabled_count;
 
@@ -46,19 +48,13 @@ integer simultaneous_count;
 integer simultaneous_full_count;
 integer simultaneous_empty_count;
 
-covergroup fifo_cg;
-cp_write : coverpoint wr_en {
-    bins write_disabled= {0};
-    bins write_enabled = {1};
-}
+integer scenario_hit;
+integer scenario_total;
 
-cp_read : coverpoint rd_en {
-    bins read_disabled = {0};
-    bins read_enabled = {1};
-}
-endgroup
-
-fifo_cg fifo_coverage = new();
+// Procedural assertion checker variables
+logic checker_armed;
+logic exp_overflow_flag;
+logic exp_underflow_flag;
 
 // DUT instantiation
 FIFO #(WIDTH) dut (
@@ -102,6 +98,9 @@ initial begin
     expected_overflow = 0;
     expected_underflow = 0;
     
+    wr_prob = 50;
+    rd_prob = 50;
+
     wr_disabled_count = 0;
     wr_enabled_count = 0;
 
@@ -118,6 +117,13 @@ initial begin
     simultaneous_count = 0;
     simultaneous_full_count = 0;
     simultaneous_empty_count = 0;
+
+    scenario_hit = 0;
+    scenario_total = 0;
+
+    checker_armed = 0;
+    exp_overflow_flag = 0;
+    exp_underflow_flag = 0;
 
     reference_fifo.delete();
 end
@@ -196,18 +202,32 @@ begin
 
     // Simultaneous operation coverage
     if (wr_en && rd_en)
-    begin
         simultaneous_count++;
-
-        if (full)
-            simultaneous_full_count++;
-
-        if (empty)
-            simultaneous_empty_count++;
-    end
 
 end
 endtask
+
+
+// Task for reporting scenario coverage
+task automatic report_scenario(
+    input string scenario_name,
+    input integer scenario_count
+);
+begin
+    scenario_total++;
+
+    if (scenario_count > 0)
+    begin
+        scenario_hit++;
+        $display("%-28s : %0d [HIT]", scenario_name, scenario_count);
+    end
+    else
+    begin
+        $display("%-28s : %0d [NOT HIT]", scenario_name, scenario_count);
+    end
+end
+endtask
+
 
 // Task for reset | Test case-1
 task reset_fifo();
@@ -414,6 +434,8 @@ begin
     @(posedge clk);
     #1;
     collect_coverage();
+
+    check_result(8'h00, 0, 0, 1, 0, 9);
     
 end
 endtask
@@ -426,6 +448,10 @@ begin
     wr_en = 1;
     rd_en = 1;
     data_in = 8'hAA;
+
+    // Capture pre-edge FIFO status
+    if (empty)
+        simultaneous_empty_count++;
 
     @(posedge clk);
     #1;
@@ -505,8 +531,6 @@ end
         expected_underflow,
         test_case_number
     );
-    
-    fifo_coverage.sample();
 
 end
 endtask
@@ -544,10 +568,27 @@ initial begin
 
     reset_fifo();
 
-    for (j = 0; j < 200; j++)
+    for (j = 0; j < 300; j++)
     begin
-        random_wr = $urandom_range(0, 1);
-        random_rd = $urandom_range(0, 1);
+        // Weighted random phases: write-heavy, read-heavy, balanced
+        if (j < 100)
+        begin
+            wr_prob = 75;
+            rd_prob = 25;
+        end
+        else if (j < 200)
+        begin
+            wr_prob = 25;
+            rd_prob = 75;
+        end
+        else
+        begin
+            wr_prob = 50;
+            rd_prob = 50;
+        end
+
+        random_wr = ($urandom_range(0, 99) < wr_prob);
+        random_rd = ($urandom_range(0, 99) < rd_prob);
         random_data = $urandom;
 
         apply_cycle(random_wr, random_rd, random_data, 11);
@@ -564,8 +605,6 @@ initial begin
         $display(" FIFO VERIFICATION PASSED");
     else
         $display(" FIFO VERIFICATION FAILED");
-
-    $display(" FUNCTIONAL COVERAGE =%0.2f%%", fifo_coverage.get_coverage());
 
     $display("");
 $display("========================================");
@@ -590,6 +629,24 @@ $display("Simultaneous Full     : %0d", simultaneous_full_count);
 $display("Simultaneous Empty    : %0d", simultaneous_empty_count);
 
 $display("----------------------------------------");
+$display("          SCENARIO COVERAGE             ");
+$display("----------------------------------------");
+
+report_scenario("Write Disabled", wr_disabled_count);
+report_scenario("Write Enabled", wr_enabled_count);
+report_scenario("Read Disabled", rd_disabled_count);
+report_scenario("Read Enabled", rd_enabled_count);
+report_scenario("FIFO Empty", empty_count);
+report_scenario("FIFO Normal", normal_count);
+report_scenario("FIFO Full", full_count);
+report_scenario("Overflow", overflow_count);
+report_scenario("Underflow", underflow_count);
+report_scenario("Simultaneous R/W", simultaneous_count);
+report_scenario("Simultaneous R/W when Full", simultaneous_full_count);
+report_scenario("Simultaneous R/W when Empty", simultaneous_empty_count);
+
+$display("----------------------------------------");
+$display("SCENARIO COVERAGE = %0d / %0d (%0.2f%%)", scenario_hit, scenario_total, (scenario_hit * 100.0) / scenario_total);
 
 $display("========================================");
     
@@ -597,40 +654,54 @@ $display("========================================");
 
 end
 
-// Assertion 1: FIFO cannot be full and empty simultaneously
 
-property p_full_empty_exclusive;
+// Procedural assertion checker (works without SVA support in free simulators)
+always @(posedge clk)
+begin
+    if (checker_armed)
+    begin
+        // Assertion 1: FIFO cannot be full and empty simultaneously
+        if (!reset && full && empty)
+        begin
+            $display("FIFO ERROR: FULL and EMPTY asserted together at time %0t", $time);
+            fail_count++;
+        end
 
-    @(posedge clk)
-    disable iff (reset)
-    !(full && empty);
+        // Assertion 2: underflow flag must follow (rd_en && empty) from the previous edge
+        if (underflow !== exp_underflow_flag)
+        begin
+            $display("FIFO assertion underflow failed at time %0t", $time);
+            fail_count++;
+        end
 
-endproperty
+        // Assertion 3: overflow flag must follow (wr_en && full) from the previous edge
+        if (overflow !== exp_overflow_flag)
+        begin
+            $display("FIFO overflow assertion failed at time %0t", $time);
+            fail_count++;
+        end
 
-assert_full_empty_exclusive:
-    assert property (p_full_empty_exclusive)
-    else $error("FIFO ERROR: FULL and EMPTY asserted together!");
-    
-property p_underflow;
-    @(posedge clk)
-    disable iff(reset)
-    (rd_en && empty |=> underflow);
-endproperty
+        // Assertion 4: occupancy counter must never exceed FIFO depth
+        if (dut.occupancy_counter > 5'd16)
+        begin
+            $display("FIFO ERROR: occupancy counter exceeded depth at time %0t", $time);
+            fail_count++;
+        end
+    end
 
-assert_underflow:
-    assert property(p_underflow)
-    else $error(" FIFO assertion underflow failed ");
-    
-property p_overflow;
-    @(posedge clk)
-    disable iff(reset)
-    (wr_en && full) |=> overflow;
-endproperty
+    // Expected flags for the next edge, based on pre-edge status
+    if (reset)
+    begin
+        exp_overflow_flag = 0;
+        exp_underflow_flag = 0;
+    end
+    else
+    begin
+        exp_overflow_flag = (wr_en && full);
+        exp_underflow_flag = (rd_en && empty);
+    end
 
-assert_overflow :
-    assert property (p_overflow)
-    else $error(" FIFO overflow assertion failed ");
-    
+    checker_armed = 1;
+end
 
-    
 endmodule
